@@ -1,0 +1,7 @@
+version: "3"
+services:
+  endlessh:
+    image: accalina/endlessh:1.0
+    build: .
+    ports:
+      - "22:2222"
