@@ -116,6 +116,7 @@ struct client {
     long long connect_time;
     long long send_next;
     long long bytes_sent;
+    int lines_sent;
     struct client *next;
     int port;
     int fd;
@@ -130,6 +131,7 @@ client_new(int fd, long long send_next)
         c->connect_time = epochms();
         c->send_next = send_next;
         c->bytes_sent = 0;
+        c->lines_sent = 0;
         c->next = 0;
         c->fd = fd;
         c->port = 0;
@@ -169,11 +171,8 @@ client_destroy(struct client *client)
     logmsg(log_debug, "close(%d)", client->fd);
     long long dt = epochms() - client->connect_time;
     logmsg(log_info,
-            "CLOSE host=%s port=%d fd=%d "
-            "time=%lld.%03lld bytes=%lld",
-            client->ipaddr, client->port, client->fd,
-            dt / 1000, dt % 1000,
-            client->bytes_sent);
+            "CLOSE host=%s",
+            client->ipaddr);
     statistics.milliseconds += dt;
     close(client->fd);
     free(client);
@@ -255,17 +254,56 @@ rand16(unsigned long s[1])
     return (s[0] >> 16) & 0xffff;
 }
 
+static const char *banner_pool[] = {
+    "SSH-2.0-OpenSSH_9.6p1 Debian-4",
+    "kex_exchange_identification: banner line 2",
+    "diffie-hellman-group-exchange-sha256",
+    "diffie-hellman-group14-sha256",
+    "diffie-hellman-group16-sha512",
+    "curve25519-sha256",
+    "curve25519-sha256@libssh.org",
+    "ecdh-sha2-nistp256",
+    "ecdh-sha2-nistp384",
+    "ecdh-sha2-nistp521",
+    "aes256-gcm@openssh.com",
+    "aes128-gcm@openssh.com",
+    "chacha20-poly1305@openssh.com",
+    "hmac-sha2-256",
+    "hmac-sha2-512",
+    "umac-128@openssh.com",
+    "umac-64@openssh.com",
+    "ssh-rsa-cert-v01@openssh.com",
+    "ssh-ed25519-cert-v01@openssh.com",
+    "ecdsa-sha2-nistp256-cert-v01@openssh.com",
+    "ssh-ed25519",
+    "rsa-sha2-512",
+    "rsa-sha2-256",
+};
+
+#define BANNER_POOL_COUNT \
+    (sizeof(banner_pool) / sizeof(banner_pool[0]))
+
 static int
-randline(char *line, int maxlen, unsigned long s[1])
+bannerline(char *line, int maxlen, int lines_sent, unsigned long s[1])
 {
-    int len = 3 + rand16(s) % (maxlen - 2);
-    for (int i = 0; i < len - 2; i++)
-        line[i] = 32 + rand16(s) % 95;
-    line[len - 2] = 13;
-    line[len - 1] = 10;
-    if (memcmp(line, "SSH-", 4) == 0)
-        line[0] = 'X';
-    return len;
+    int len;
+    if (lines_sent == 0) {
+        const char *banner = "SSH-2.0-OpenSSH_9.6p1 Debian-4";
+        len = strlen(banner);
+        if (len > maxlen - 2)
+            len = maxlen - 2;
+        memcpy(line, banner, len);
+    } else {
+        int idx = rand16(s) % BANNER_POOL_COUNT;
+        const char *entry = banner_pool[idx];
+        len = strlen(entry);
+        if (len > maxlen - 2)
+            len = maxlen - 2;
+        memcpy(line, entry, len);
+    }
+    line[len] = 13;
+    line[len + 1] = 10;
+    return len + 2;
 }
 
 static volatile sig_atomic_t running = 1;
@@ -603,7 +641,7 @@ static struct client *
 sendline(struct client *client, int max_line_length, unsigned long *rng)
 {
     char line[256];
-    int len = randline(line, max_line_length, rng);
+    int len = bannerline(line, max_line_length, client->lines_sent, rng);
     for (;;) {
         ssize_t out = write(client->fd, line, len);
         logmsg(log_debug, "write(%d) = %d", client->fd, (int)out);
@@ -619,6 +657,7 @@ sendline(struct client *client, int max_line_length, unsigned long *rng)
         } else {
             client->bytes_sent += out;
             statistics.bytes_sent += out;
+            client->lines_sent++;
             return client;
         }
     }
@@ -827,9 +866,8 @@ main(int argc, char **argv)
                     close(fd);
                 } else {
                     fifo_append(fifo, client);
-                    logmsg(log_info, "ACCEPT host=%s port=%d fd=%d n=%d/%d",
-                            client->ipaddr, client->port, client->fd,
-                            fifo->length, config.max_clients);
+                    logmsg(log_info, "ACCEPT host=%s",
+                            client->ipaddr);
                 }
             }
         }
